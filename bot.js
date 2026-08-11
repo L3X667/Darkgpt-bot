@@ -4,11 +4,11 @@
 //
 // SETUP :
 //   1. Clé Groq gratuite sur https://console.groq.com → API Keys
-//   2. Crée un .env avec DISCORD_TOKEN et GROQ_API_KEY
+//   2. Crée un .env avec DISCORD_TOKEN et DARKGPT_API_KEY
 //   3. node bot.js
 //
 // SUR RENDER :
-//   Environment Variables → DISCORD_TOKEN + GROQ_API_KEY
+//   Environment Variables → DISCORD_TOKEN + DARKGPT_API_KEY
 //   Build Command        → npm install
 //   Start Command        → node bot.js
 // ─────────────────────────────────────────────────────────────────────────────
@@ -39,7 +39,7 @@ if (missing.length > 0) {
 if (!existsSync('./.env.example')) {
   writeFileSync(
     './.env.example',
-    'DISCORD_TOKEN=ton_token_discord\nGROQ_API_KEY=ta_cle_groq\n'
+    'DISCORD_TOKEN=ton_token_discord\nDARKGPT_API_KEY=ta_cle_darkgpt\n'
   );
 }
 
@@ -51,14 +51,14 @@ config();
 // ─── Validation des variables ────────────────────────────────────────────────
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const GROQ_API_KEY  = process.env.GROQ_API_KEY;
+const DARKGPT_API_KEY  = process.env.DARKGPT_API_KEY;
 
 if (!DISCORD_TOKEN) {
   console.error('[L3X] DISCORD_TOKEN manquant — remplis .env ou les variables Render.');
   process.exit(1);
 }
-if (!GROQ_API_KEY) {
-  console.error('[L3X] GROQ_API_KEY manquante — clé gratuite sur https://console.groq.com');
+if (!DARKGPT_API_KEY) {
+  console.error('[L3X] DARKGPT_API_KEY manquante — clé gratuite sur https://console.groq.com');
   process.exit(1);
 }
 
@@ -80,7 +80,7 @@ const client = new Client({
   ],
 });
 
-const groq = new Groq({ apiKey: GROQ_API_KEY });
+const groq = new Groq({ apiKey: DARKGPT_API_KEY });
 
 // ─── Historique par channel (max 20 messages) ────────────────────────────────
 
@@ -154,7 +154,7 @@ async function askGroq(interaction, prompt) {
 
     const msg =
       err.status === 429 ? 'Rate limit atteint. Réessaie dans quelques secondes.' :
-      err.status === 401 ? 'Clé API invalide — vérifie GROQ_API_KEY.'             :
+      err.status === 401 ? 'Clé API invalide — vérifie DARKGPT_API_KEY.'             :
       `Erreur inattendue : ${err.message}`;
 
     try {
