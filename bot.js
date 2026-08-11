@@ -1,13 +1,15 @@
-// ───────────────────────────────────────────────────────────────────────────── 
-// L3X BOT — Discord + Claude API
+// ─────────────────────────────────────────────────────────────────────────────
+// L3X BOT — Discord + Groq API (gratuit)
 // GitHub : push ce fichier seul, rien d'autre requis
 //
 // SETUP :
-//   1. Copie .env.example → .env et remplis les deux valeurs
-//   2. node bot.js
+//   1. Clé Groq gratuite sur https://console.groq.com → API Keys
+//   2. Crée un .env avec DISCORD_TOKEN et GROQ_API_KEY
+//   3. node bot.js
 //
 // SUR RENDER :
-//   Environment Variables → DISCORD_TOKEN + ANTHROPIC_API_KEY
+//   Environment Variables → DISCORD_TOKEN + GROQ_API_KEY
+//   Build Command        → npm install
 //   Start Command        → node bot.js
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -17,9 +19,9 @@ import { existsSync, writeFileSync } from 'fs';
 // ─── Auto-install deps ───────────────────────────────────────────────────────
 
 const DEPS = {
-  'discord.js':        '^14.15.0',
-  '@anthropic-ai/sdk': '^0.27.0',
-  'dotenv':            '^16.4.0',
+  'discord.js': '^14.15.0',
+  'groq-sdk':   '^0.7.0',
+  'dotenv':     '^16.4.0',
 };
 
 const missing = Object.keys(DEPS).filter(
@@ -37,7 +39,7 @@ if (missing.length > 0) {
 if (!existsSync('./.env.example')) {
   writeFileSync(
     './.env.example',
-    'DISCORD_TOKEN=ton_token_discord\nANTHROPIC_API_KEY=ta_cle_anthropic\n'
+    'DISCORD_TOKEN=ton_token_discord\nGROQ_API_KEY=ta_cle_groq\n'
   );
 }
 
@@ -48,24 +50,24 @@ config();
 
 // ─── Validation des variables ────────────────────────────────────────────────
 
-const DISCORD_TOKEN     = process.env.DISCORD_TOKEN;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const GROQ_API_KEY  = process.env.GROQ_API_KEY;
 
 if (!DISCORD_TOKEN) {
   console.error('[L3X] DISCORD_TOKEN manquant — remplis .env ou les variables Render.');
   process.exit(1);
 }
-if (!ANTHROPIC_API_KEY) {
-  console.error('[L3X] ANTHROPIC_API_KEY manquante — remplis .env ou les variables Render.');
+if (!GROQ_API_KEY) {
+  console.error('[L3X] GROQ_API_KEY manquante — clé gratuite sur https://console.groq.com');
   process.exit(1);
 }
 
 // ─── Init clients ────────────────────────────────────────────────────────────
 
 const { Client, GatewayIntentBits } = await import('discord.js');
-const { default: Anthropic }        = await import('@anthropic-ai/sdk');
+const { default: Groq }             = await import('groq-sdk');
 
-const client    = new Client({
+const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
@@ -73,7 +75,7 @@ const client    = new Client({
   ],
 });
 
-const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+const groq = new Groq({ apiKey: GROQ_API_KEY });
 
 // ─── Historique par channel (max 20 messages) ────────────────────────────────
 
@@ -109,9 +111,14 @@ function splitMessage(text, max = 2000) {
   return chunks;
 }
 
-// ─── Appel Claude ────────────────────────────────────────────────────────────
+// ─── Appel Groq ──────────────────────────────────────────────────────────────
 
-async function askClaude(message, prompt) {
+const SYSTEM_PROMPT =
+  'Tu es L3X, un assistant Discord utile et concis. ' +
+  'Réponds toujours en français sauf si on te parle dans une autre langue. ' +
+  'Garde tes réponses courtes et directes — tu es dans un chat Discord, pas un document.';
+
+async function askGroq(message, prompt) {
   const channelId = message.channel.id;
 
   pushAndTrim(channelId, 'user', prompt);
@@ -121,22 +128,18 @@ async function askClaude(message, prompt) {
     await message.channel.sendTyping();
     typingInterval = setInterval(() => message.channel.sendTyping(), 8000);
 
-    const res = await anthropic.messages.create({
-      model:      'claude-sonnet-4-6',
-      max_tokens: 1024,
-      system:
-        'Tu es L3X, un assistant Discord utile et concis. ' +
-        'Réponds toujours en français sauf si on te parle dans une autre langue. ' +
-        'Garde tes réponses courtes et directes — tu es dans un chat Discord, pas un document.',
-      messages: getHistory(channelId),
+    const res = await groq.chat.completions.create({
+      model:       'openai/gpt-oss-120b',
+      max_tokens:  1024,
+      messages:    [
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...getHistory(channelId),
+      ],
     });
 
     clearInterval(typingInterval);
 
-    const reply = res.content
-      .filter((b) => b.type === 'text')
-      .map((b)  => b.text)
-      .join('\n');
+    const reply = res.choices[0]?.message?.content ?? 'Pas de réponse.';
 
     pushAndTrim(channelId, 'assistant', reply);
 
@@ -146,11 +149,11 @@ async function askClaude(message, prompt) {
 
   } catch (err) {
     clearInterval(typingInterval);
-    console.error('[L3X] Erreur API Anthropic:', err);
+    console.error('[L3X] Erreur API Groq:', err);
 
     const msg =
       err.status === 429 ? 'Rate limit atteint. Réessaie dans quelques secondes.' :
-      err.status === 401 ? 'Clé API invalide — vérifie ANTHROPIC_API_KEY.'        :
+      err.status === 401 ? 'Clé API invalide — vérifie GROQ_API_KEY.'             :
       `Erreur inattendue : ${err.message}`;
 
     await message.reply(msg);
@@ -169,11 +172,11 @@ client.on('messageCreate', async (message) => {
 
   const content = message.content;
 
-  // !claude [prompt] — pose une question à Claude
+  // !claude [prompt] — pose une question à Groq
   if (content.startsWith('!claude ')) {
     const prompt = content.slice(8).trim();
     if (!prompt) { await message.reply('Prompt vide.'); return; }
-    await askClaude(message, prompt);
+    await askGroq(message, prompt);
     return;
   }
 
@@ -188,4 +191,3 @@ client.on('messageCreate', async (message) => {
 // ─── Connexion ───────────────────────────────────────────────────────────────
 
 client.login(DISCORD_TOKEN);
-
