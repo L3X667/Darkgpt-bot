@@ -62,10 +62,15 @@ if (!GROQ_API_KEY) {
   process.exit(1);
 }
 
+// ─── Config ──────────────────────────────────────────────────────────────────
+
+// Seul salon autorisé — le bot ignore tous les autres
+const ALLOWED_CHANNEL = '1536622022426099793';
+
 // ─── Init clients ────────────────────────────────────────────────────────────
 
-const { Client, GatewayIntentBits } = await import('discord.js');
-const { default: Groq }             = await import('groq-sdk');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = await import('discord.js');
+const { default: Groq } = await import('groq-sdk');
 
 const client = new Client({
   intents: [
@@ -118,37 +123,33 @@ const SYSTEM_PROMPT =
   'Réponds toujours en français sauf si on te parle dans une autre langue. ' +
   'Garde tes réponses courtes et directes — tu es dans un chat Discord, pas un document.';
 
-async function askGroq(message, prompt) {
-  const channelId = message.channel.id;
+async function askGroq(interaction, prompt) {
+  const channelId = interaction.channelId;
 
   pushAndTrim(channelId, 'user', prompt);
 
-  let typingInterval;
   try {
-    await message.channel.sendTyping();
-    typingInterval = setInterval(() => message.channel.sendTyping(), 8000);
+    // Defer pour éviter le timeout Discord (3s max sans réponse)
+    await interaction.deferReply();
 
     const res = await groq.chat.completions.create({
-      model:       'openai/gpt-oss-120b',
-      max_tokens:  1024,
-      messages:    [
+      model:      'openai/gpt-oss-120b',
+      max_tokens: 1024,
+      messages:   [
         { role: 'system', content: SYSTEM_PROMPT },
         ...getHistory(channelId),
       ],
     });
-
-    clearInterval(typingInterval);
 
     const reply = res.choices[0]?.message?.content ?? 'Pas de réponse.';
 
     pushAndTrim(channelId, 'assistant', reply);
 
     const chunks = splitMessage(reply);
-    await message.reply(chunks[0]);
-    for (const chunk of chunks.slice(1)) await message.channel.send(chunk);
+    await interaction.editReply(chunks[0]);
+    for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
 
   } catch (err) {
-    clearInterval(typingInterval);
     console.error('[L3X] Erreur API Groq:', err);
 
     const msg =
@@ -156,34 +157,67 @@ async function askGroq(message, prompt) {
       err.status === 401 ? 'Clé API invalide — vérifie GROQ_API_KEY.'             :
       `Erreur inattendue : ${err.message}`;
 
-    await message.reply(msg);
+    try {
+      await interaction.editReply(msg);
+    } catch {
+      await interaction.reply({ content: msg, ephemeral: true });
+    }
   }
 }
 
-// ─── Events Discord ──────────────────────────────────────────────────────────
+// ─── Enregistrement des slash commands ──────────────────────────────────────
 
-client.once('ready', () => {
+client.once('clientReady', async () => {
   console.log(`[L3X] Connecté : ${client.user.tag}`);
-  console.log('[L3X] Commandes : !claude [prompt] | !reset');
+  console.log(`[L3X] Salon autorisé : ${ALLOWED_CHANNEL}`);
+
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('darkgpt')
+      .setDescription('Pose une question à l\'IA')
+      .addStringOption((opt) =>
+        opt.setName('prompt')
+          .setDescription('Ta question')
+          .setRequired(true)
+      ),
+    new SlashCommandBuilder()
+      .setName('reset')
+      .setDescription('Efface l\'historique de conversation'),
+  ].map((cmd) => cmd.toJSON());
+
+  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+
+  try {
+    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    console.log('[L3X] Slash commands enregistrées : /darkgpt, /reset');
+  } catch (err) {
+    console.error('[L3X] Erreur enregistrement commands:', err);
+  }
 });
 
-client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
+// ─── Handler interactions ────────────────────────────────────────────────────
 
-  const content = message.content;
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
 
-  // !claude [prompt] — pose une question à Groq
-  if (content.startsWith('!claude ')) {
-    const prompt = content.slice(8).trim();
-    if (!prompt) { await message.reply('Prompt vide.'); return; }
-    await askGroq(message, prompt);
+  // Salon verrouillé — répond en éphémère si mauvais channel
+  if (interaction.channelId !== ALLOWED_CHANNEL) {
+    await interaction.reply({
+      content: `Cette commande n'est disponible que dans <#${ALLOWED_CHANNEL}>.`,
+      ephemeral: true,
+    });
     return;
   }
 
-  // !reset — efface l'historique du channel
-  if (content === '!reset') {
-    history.delete(message.channel.id);
-    await message.reply('Historique effacé.');
+  if (interaction.commandName === 'darkgpt') {
+    const prompt = interaction.options.getString('prompt');
+    await askGroq(interaction, prompt);
+    return;
+  }
+
+  if (interaction.commandName === 'reset') {
+    history.delete(interaction.channelId);
+    await interaction.reply('Historique effacé.');
     return;
   }
 });
