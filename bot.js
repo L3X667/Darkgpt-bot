@@ -1,9 +1,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// L3X BOT — Discord + Groq API (gratuit)
+// L3X BOT — Discord + DarkGPT API
 // GitHub : push ce fichier seul, rien d'autre requis
 //
 // SETUP :
-//   1. Clé Groq gratuite sur https://console.groq.com → API Keys
+//   1. Clé API sur https://darkgpt.chat/api-keys
 //   2. Crée un .env avec DISCORD_TOKEN et DARKGPT_API_KEY
 //   3. node bot.js
 //
@@ -20,7 +20,6 @@ import { existsSync, writeFileSync } from 'fs';
 
 const DEPS = {
   'discord.js': '^14.15.0',
-  'groq-sdk':   '^0.7.0',
   'dotenv':     '^16.4.0',
 };
 
@@ -50,27 +49,27 @@ config();
 
 // ─── Validation des variables ────────────────────────────────────────────────
 
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const DARKGPT_API_KEY  = process.env.DARKGPT_API_KEY;
+const DISCORD_TOKEN   = process.env.DISCORD_TOKEN;
+const DARKGPT_API_KEY = process.env.DARKGPT_API_KEY;
 
 if (!DISCORD_TOKEN) {
   console.error('[L3X] DISCORD_TOKEN manquant — remplis .env ou les variables Render.');
   process.exit(1);
 }
 if (!DARKGPT_API_KEY) {
-  console.error('[L3X] DARKGPT_API_KEY manquante — clé gratuite sur https://console.groq.com');
+  console.error('[L3X] DARKGPT_API_KEY manquante — clé sur https://darkgpt.chat/api-keys');
   process.exit(1);
 }
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-// Seul salon autorisé — le bot ignore tous les autres
-const ALLOWED_CHANNEL = '1536622022426099793';
+const ALLOWED_CHANNEL  = '1536622022426099793';
+const DARKGPT_BASE_URL = 'https://darkgpt.chat/v1/chat/completions';
+const DARKGPT_MODEL    = 'claude-4.6-sonnet';
 
-// ─── Init clients ────────────────────────────────────────────────────────────
+// ─── Init Discord ────────────────────────────────────────────────────────────
 
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = await import('discord.js');
-const { default: Groq } = await import('groq-sdk');
 
 const client = new Client({
   intents: [
@@ -79,8 +78,6 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
   ],
 });
-
-const groq = new Groq({ apiKey: DARKGPT_API_KEY });
 
 // ─── Historique par channel (max 20 messages) ────────────────────────────────
 
@@ -116,32 +113,45 @@ function splitMessage(text, max = 2000) {
   return chunks;
 }
 
-// ─── Appel Groq ──────────────────────────────────────────────────────────────
+// ─── Appel DarkGPT ───────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT =
   'Tu es L3X, un assistant Discord utile et concis. ' +
   'Réponds toujours en français sauf si on te parle dans une autre langue. ' +
   'Garde tes réponses courtes et directes — tu es dans un chat Discord, pas un document.';
 
-async function askGroq(interaction, prompt) {
+async function askDarkGPT(interaction, prompt) {
   const channelId = interaction.channelId;
 
   pushAndTrim(channelId, 'user', prompt);
 
   try {
-    // Defer pour éviter le timeout Discord (3s max sans réponse)
     await interaction.deferReply();
 
-    const res = await groq.chat.completions.create({
-      model:      'openai/gpt-oss-120b',
-      max_tokens: 1024,
-      messages:   [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...getHistory(channelId),
-      ],
+    const res = await fetch(DARKGPT_BASE_URL, {
+      method:  'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${DARKGPT_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model:       DARKGPT_MODEL,
+        max_tokens:  1024,
+        temperature: 0.7,
+        messages:    [
+          { role: 'system', content: SYSTEM_PROMPT },
+          ...getHistory(channelId),
+        ],
+      }),
     });
 
-    const reply = res.choices[0]?.message?.content ?? 'Pas de réponse.';
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw Object.assign(new Error(err?.error?.message ?? res.statusText), { status: res.status });
+    }
+
+    const data  = await res.json();
+    const reply = data.choices?.[0]?.message?.content ?? 'Pas de réponse.';
 
     pushAndTrim(channelId, 'assistant', reply);
 
@@ -150,11 +160,12 @@ async function askGroq(interaction, prompt) {
     for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
 
   } catch (err) {
-    console.error('[L3X] Erreur API Groq:', err);
+    console.error('[L3X] Erreur API DarkGPT:', err);
 
     const msg =
       err.status === 429 ? 'Rate limit atteint. Réessaie dans quelques secondes.' :
-      err.status === 401 ? 'Clé API invalide — vérifie DARKGPT_API_KEY.'             :
+      err.status === 401 ? 'Clé API invalide — vérifie DARKGPT_API_KEY.'          :
+      err.status === 403 ? 'Clé révoquée — génère-en une nouvelle sur darkgpt.chat.' :
       `Erreur inattendue : ${err.message}`;
 
     try {
@@ -174,7 +185,7 @@ client.once('clientReady', async () => {
   const commands = [
     new SlashCommandBuilder()
       .setName('darkgpt')
-      .setDescription('Pose une question à l\'IA')
+      .setDescription('Pose une question à DarkGPT')
       .addStringOption((opt) =>
         opt.setName('prompt')
           .setDescription('Ta question')
@@ -200,10 +211,9 @@ client.once('clientReady', async () => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  // Salon verrouillé — répond en éphémère si mauvais channel
   if (interaction.channelId !== ALLOWED_CHANNEL) {
     await interaction.reply({
-      content: `Cette commande n'est disponible que dans <#${ALLOWED_CHANNEL}>.`,
+      content:   `Cette commande n'est disponible que dans <#${ALLOWED_CHANNEL}>.`,
       ephemeral: true,
     });
     return;
@@ -211,7 +221,7 @@ client.on('interactionCreate', async (interaction) => {
 
   if (interaction.commandName === 'darkgpt') {
     const prompt = interaction.options.getString('prompt');
-    await askGroq(interaction, prompt);
+    await askDarkGPT(interaction, prompt);
     return;
   }
 
